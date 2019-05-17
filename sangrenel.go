@@ -15,28 +15,33 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Shopify/sarama"
 	"github.com/jamiealquiza/tachymeter"
-	"gopkg.in/Shopify/sarama.v1"
 )
 
 type config struct {
-	brokers            []string
-	topic              string
-	msgSize            int
-	msgRate            uint64
-	batchSize          int
-	compression        sarama.CompressionCodec
-	compressionName    string
-	requiredAcks       sarama.RequiredAcks
-	requiredAcksName   string
-	workers            int
-	writersPerWorker   int
-	noop               bool
-	interval           int
-	kafkaVersion       sarama.KafkaVersion
-	kafkaVersionString string
-	tls                bool
-	tlsCaCertificate   string
+	brokers              []string
+	topic                string
+	msgSize              int
+	msgRate              uint64
+	batchSize            int
+	compression          sarama.CompressionCodec
+	compressionName      string
+	requiredAcks         sarama.RequiredAcks
+	requiredAcksName     string
+	workers              int
+	writersPerWorker     int
+	noop                 bool
+	interval             int
+	kafkaVersion         sarama.KafkaVersion
+	kafkaVersionString   string
+	tls                  bool
+	tlsCaCertificate     string
+	tlsClientKey         string
+	tlsClientCertificate string
+	saslMechanism        string
+	saslUsername         string
+	saslPassword         string
 }
 
 var (
@@ -65,6 +70,11 @@ func init() {
 	flag.StringVar(&Config.kafkaVersionString, "api-version", "", "Explicit sarama.Version string")
 	flag.BoolVar(&Config.tls, "tls", false, "Whether to enable TLS communcation")
 	flag.StringVar(&Config.tlsCaCertificate, "tls-ca-cert", "", "Path to the CA SSL certificate")
+	flag.StringVar(&Config.tlsClientCertificate, "tls-client-cert", "", "Path to the Client SSL certificate")
+	flag.StringVar(&Config.tlsClientKey, "tls-client-key", "", "Path to the Client SSL key")
+	flag.StringVar(&Config.saslMechanism, "sasl-mechanism", "", "SASL Mechanism to use: cram-sha256, cram-sha512")
+	flag.StringVar(&Config.saslUsername, "sasl-username", "", "SASL Username")
+	flag.StringVar(&Config.saslPassword, "sasl-password", "", "SASL Password")
 	flag.Parse()
 
 	Config.brokers = strings.Split(*brokerString, ",")
@@ -253,8 +263,48 @@ func worker(n int, t *tachymeter.Tachymeter) {
 				RootCAs:            caCertPool,
 				InsecureSkipVerify: false,
 			}
+
+			if Config.tlsClientCertificate != "" && Config.tlsClientKey != "" {
+				clientCert, err := ioutil.ReadFile(Config.tlsClientCertificate)
+				if err != nil {
+					log.Println(err)
+					os.Exit(1)
+				}
+
+				clientKey, err := ioutil.ReadFile(Config.tlsClientKey)
+				if err != nil {
+					log.Println(err)
+					os.Exit(1)
+				}
+
+				pair, err := tls.X509KeyPair(clientCert, clientKey)
+				if err != nil {
+					log.Println(err)
+					os.Exit(1)
+				}
+
+				tlsConfig.Certificates = []tls.Certificate{pair}
+			}
+
 			conf.Net.TLS.Enable = true
 			conf.Net.TLS.Config = tlsConfig
+		}
+
+		if Config.saslMechanism != "" {
+			conf.Net.SASL.Enable = true
+			conf.Net.SASL.Handshake = true
+			if Config.saslMechanism == "cram-sha512" {
+				conf.Net.SASL.SCRAMClientGeneratorFunc = func() sarama.SCRAMClient { return &XDGSCRAMClient{HashGeneratorFcn: SHA512} }
+				conf.Net.SASL.Mechanism = sarama.SASLMechanism(sarama.SASLTypeSCRAMSHA512)
+			} else if Config.saslMechanism == "cram-sha256" {
+				conf.Net.SASL.SCRAMClientGeneratorFunc = func() sarama.SCRAMClient { return &XDGSCRAMClient{HashGeneratorFcn: SHA256} }
+				conf.Net.SASL.Mechanism = sarama.SASLMechanism(sarama.SASLTypeSCRAMSHA256)
+			} else {
+				log.Printf("invalid SASL mechanism \"%s\": can be either \"cram-sha256\" or \"cram-sha512\"\n", Config.saslMechanism)
+				os.Exit(1)
+			}
+			conf.Net.SASL.User = Config.saslUsername
+			conf.Net.SASL.Password = Config.saslPassword
 		}
 
 		client, err := sarama.NewClient(Config.brokers, conf)
